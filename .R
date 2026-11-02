@@ -103,7 +103,7 @@ protein_summary2 %>%
   theme_classic() +
   theme(axis.text.x = element_blank())
 
-# Processing
+      ### Processing
 
 df_prot_raw <- read.delim(pg_matrix_path) %>%
   # Filter out all values based on 1 or less precursors
@@ -123,7 +123,7 @@ df_prot_raw <- read.delim(pg_matrix_path) %>%
 
 
 # Distirbution check
-df_prot_raw2 %>% 
+df_prot_raw %>% 
   dplyr::select(-Protein.Group, -Protein.Ids, -Protein.Names, -Genes, -First.Protein.Description, -UID) %>%
   gather() %>%
   # filter(!grepl(key, pattern = "blank")) %>%
@@ -134,13 +134,97 @@ df_prot_raw2 %>%
   labs(fill ="", x = "Sample", y = "LFQ intensity")
 
 
+df_prot_clean <- df_prot_raw %>%
+  dplyr::select(-Protein.Group, -Protein.Ids, -Protein.Names, -Genes, -First.Protein.Description) %>%
+  dplyr::select(UID, everything()) 
+
+df_uid_information <- df_prot_raw %>%
+  dplyr::select(UID, Protein.Group, Protein.Ids, Protein.Names, Genes, First.Protein.Description)
+
+
+# AANPASSEN
+pheno <- data.frame(samplesnames = colnames(df_prot_clean2 %>%  
+                          dplyr::select(-UID))) %>% 
+  mutate(samples = gsub(samplesnames, pattern = "GM.*", replacement = "")) %>%
+  mutate(samples = gsub(samplesnames, pattern = "S4.*", replacement = "")) %>%
+  mutate(ID= samples) %>%
+  mutate(ct = factor(ID,levels=unique(ID))) %>%
+  ungroup() 
+
+## For cb,mpb and plts 
+
+pheno_parsed <- parse_sample_name(pheno$samplesnames)
+pheno <- pheno %>%
+  dplyr::mutate(ID = dplyr::case_when(
+    pheno_parsed$cell_type %in% params$cell_types_with_day ~ paste0(pheno_parsed$cell_type, "_day", pheno_parsed$day),
+    TRUE ~ "PLTs"
+  ))
+
+
+# Process the data
+vvs = df_prot_clean %>% 
+      column_to_rownames('UID') %>% 
+      dplyr::mutate(across(.cols = everything(), ~ !is.na(.))) %>% # is a value present?
+      t() %>% 
+      as.data.frame() %>% 
+      add_column(ct = pheno$ct) %>% 
+      group_by(ct) %>% 
+      dplyr::summarise_all(sum) %>% 
+      column_to_rownames('ct') %>%
+      dplyr::mutate(across(.cols = everything(), ~ . / as.numeric(table(list(pheno$ct))))*100) %>% 
+      t() %>%
+      as.data.frame() %>% 
+      dplyr::mutate(No_pass = rowSums(across(.cols = everything(), ~ . >= valid_value_threshold ))) %>% # valid value threshold
+      rownames_to_column('UID')                              
+
+##Select valid_values per percentage (>65%) 
+valid_value_threshold <- 65
+df_prot_valid = df_prot_clean %>% 
+              subset(UID %in% vvs$UID[vvs$No_pass >=1])
+# plot of the amount of quantified proteins per type
+vvs %>% 
+    dplyr::select(pheno$ct) %>% 
+    gather() %>% 
+    filter(value >= valid_value_threshold) %>% # Threshold
+    group_by(key=factor(key, levels = levels(pheno$ct))) %>% 
+    dplyr::summarise(Freq=n()) %>% 
+  ungroup() %>%
+    # Visualization
+    ggplot(aes(x=key, y=Freq)) + #, fill=as.factor(rev(round(value)))))+
+          geom_bar(stat='identity', fill = "darkblue")+
+          scale_y_continuous(limits=c(0,8500), breaks=seq(0,7500,1000), expand=c(0,0))+
+          scale_fill_brewer()+
+          xlab('')+
+          ylab('#')+
+          ggtitle('Valid values (%)')+
+          theme_classic()+
+          theme(axis.text.x = element_text(angle=90, hjust=1, vjust=.5),legend.title = element_blank())
+      #300x250
 
 
 
+# impute
+# define parameters
+mann_downshift = imputation_downshift
+mann_width = imputation_width
 
+# create imputed values
+imputed_values = df_prot_valid %>% 
+  dplyr::select(pheno$samplesnames[order(pheno$ct)]) %>% 
+  dplyr::mutate(across(.cols = everything(), ~ rnorm(length(.), (mean(na.omit(.) -  mann_downshift*sd(na.omit(.)))), (sd(na.omit(.))*mann_width))))
 
-
-
+# replace NA's in DF with imputed values using coalesce (no need for a mask in tidyverse)  
+df_prot_imp = df_prot_valid %>% 
+  dplyr::select(colnames(imputed_values)) %>%
+  # select(pheno$samplesnames[order(pheno$ct)]) %>% 
+  map2_df(.,imputed_values2,coalesce) %>% 
+  bind_cols(UID = df_prot_valid2$UID)
+# dit laatste kan ws beter, bind met een charateristics df?, maar coalsce mag geen rownames hebben... 
+                
+# check
+df_prot_imp %>% 
+  dplyr::select(pheno$samplesnames[order(pheno$ct)]) %>% 
+  boxplot()
 
 
 
