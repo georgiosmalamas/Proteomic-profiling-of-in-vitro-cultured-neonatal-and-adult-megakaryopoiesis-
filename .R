@@ -1001,11 +1001,39 @@ df_all <- bind_rows(df_bp, df_cc, df_mf)
 ##Figure 4C
 ##Figure 4D
 
-
-
-
-
-
+# Data
+df_bar <- data.frame(
+  Group = c("a", "b", "c", "d", "e"),
+  Numerator = c(7, 17, 11, 14, 12),
+  Denominator = c(20, 45, 31, 35, 47)
+) %>%
+  mutate(Percentage = Numerator / Denominator * 100)
+#  colors
+my_cols <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#D55E00")
+# Plot
+TF_barplot <- ggplot(df_bar, aes(x = Group, y = Percentage, fill = Group)) +
+  geom_col(width = 0.6, color = "black") +
+  geom_text(
+    aes(label = paste0(Numerator, "/", Denominator, 
+                       " (", round(Percentage, 1), "%)")),
+    vjust = -0.3, angle = 90, size = 4
+  ) +
+  scale_y_continuous(
+  limits = c(0, 60),
+  breaks = seq(0, 60, 15),  
+  expand = c(0, 0)
+) +
+  scale_fill_manual(values = my_cols) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(size = 12, face = "bold"),
+    axis.title.y = element_text(size = 14)
+  ) +
+  labs(y = "Percentage (%)")
+# Export
+ggsave( filename = "TFS_barplot.pdf",  plot = TF_barplot, device = cairo_pdf, width = 8,height = 6,  units = "in")
 
 ######################################################
 ## Thom & Stokhuijzen et al dataset inclusion ##
