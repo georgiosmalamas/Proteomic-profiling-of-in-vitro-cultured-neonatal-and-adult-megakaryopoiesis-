@@ -274,7 +274,7 @@ fit <- df_prot_imp %>%
 # Fit contrasts, compute empirical Bayes statistics
 fit_contrasts <- contrasts.fit(fit, contrast_matrix)
 fit_ebayes <- eBayes(fit_contrasts)
-sig_tests <- decideTests(fit_ebayes, p.value = de_pvalue_cutoff, adjust.method = "BH", lfc = de_lfc_cutoff)
+sig_tests <- decideTests(fit_ebayes, p.value = 0.05, adjust.method = "BH", lfc = 1)
 # Extract and annotate significant results
 df_sigresults <- sig_tests %>%
    #dplyr::select(-c('CB_day14_vs_day5','MPB_day14_vs_day5','Interaction_d14_vs_d5')) %>%
@@ -308,13 +308,103 @@ df_sigresults_cb_ <- sig_tests %>%
 ######################################################
 ## WGCNA  ##
 ######################################################
-
-
-
-
-
-
-
+#If you like only the signifcant proteins to appear in the WGCNA
+df_prot_imp_sig <- df_prot_imp %>% 
+  filter((UID %in% df_sigresults$UID))
+df_uid_info_sig <- df_uid_information %>% 
+  filter(UID %in% df_prot_imp_sig$UID)
+#########WGCNA BEGIN
+# Call the network topology analysis function
+# and adjacency() below need this raw expression matrix, not a correlation matrix.
+df_wgcna_cor_pearson <- df_prot_imp_sig %>%
+  left_join(df_uid_info_sig, "UID") %>%
+  mutate(ID = paste(UID, Genes, sep = "_")) %>%
+  distinct(ID, .keep_all = T) %>%
+  filter(!is.na(ID)) %>%
+  `rownames<-`(NULL) %>%
+  column_to_rownames("ID") %>%
+  dplyr::select(unique(pheno_statistics$samplesnames)) %>%
+  t()
+df_wgcna_cor <- df_wgcna_cor_pearson %>%
+  Hmisc::rcorr(type = "pearson")
+# df_wgcna_cor$r[df_wgcna_cor$n < 30 ] = 0
+sft <- df_wgcna_cor_pearson%>%
+  WGCNA::pickSoftThreshold(powerVector = c(c(1:10), seq(12,30,2)), verbose = 1, networkType = 'signed')
+# look for the optimal parameters
+sizeGrWindow(9,5)
+par(mfrow = c(1,2))
+cex1 = 0.9
+powers = c(c(1:10), seq(12,30,2))
+# Scale-free topology fit index as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit,signed R^2",type="n", main = paste("Scale independence"))
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],labels=powers,cex=cex1,col="red")
+# this line corresponds to using an R^2 cut-off of h
+abline(h=0.90,col="red")
+abline(h=0.80,col="blue")
+# Mean connectivity as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], sft$fitIndices[,5], xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n", main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+# set the soft-power, based on above
+# according to wgcna website, above .8 is ok, of does not happen use 20
+softPower = 10
+# calculate the adjacency, Mann uses a signed network
+adjacency = df_wgcna_cor_pearson %>%
+  WGCNA::adjacency(power = softPower, type='signed')
+# turn the adjacency into a topological map, and make a dissimilarity matrix
+TOM = TOMsimilarity(adjacency)
+dissTOM = 1-TOM
+# Clustering of the TOM, using hclust: Mann paper used average
+protTree = hclust(as.dist(dissTOM), method='average')
+# plot the clustering
+# sizeGrWindow(12,9)
+plot(protTree, xlab='', sub='', main = 'Protein clustering on TOM-based dissimilarity',labels = FALSE, hang = 0.4)
+# now select modules using dynamic tree cut
+dynamicMods = dynamicTreeCut::cutreeDynamic(dendro=protTree, distM=dissTOM, deepSplit = 4, pamRespectsDendro = F, minClusterSize = 15)
+table(dynamicMods)
+# dynamicMods is one module label per protein, in the column order of
+# df_wgcna_cor_pearson (i.e. the row order before it was transposed for WGCNA) --
+# so transpose back to recover "UID_Genes" IDs as rows before attaching ME.
+wgcna_correlation <- t(df_wgcna_cor_pearson) %>%
+  as.data.frame() %>%
+  rownames_to_column("ID") %>%
+  separate(ID, into = c("UID", "Genes"), sep ="_", remove = F) %>%
+  mutate(ME = dynamicMods) %>%
+  dplyr::select(ID, UID, Genes, ME, contains("UID"))
+colnames(wgcna_correlation) <- gsub("UID","Protein.Group", colnames(wgcna_correlation))
+rownames(wgcna_correlation) <- wgcna_correlation$Protein.Group
+#zscores table creation
+zscores_df_prot <- df_prot_imp_sig %>%
+  dplyr::mutate(Proteins = paste0(UID)) %>%
+  #filter(rowSums(abs(results))>0) %>%
+  column_to_rownames('UID') %>%
+  dplyr::select(matches('_')) %>%
+  t() %>%
+  scale() %>%
+  t() 
+zscores_df_prot <- as.data.frame(zscores_df_prot)
+colnames(zscores_df_prot)
+tz <- t(zscores_df_prot) 
+# Renaming logic for heatmap column labels (replicate-collapsed). Day is zero-padded
+rename_logic <- function(sample) {
+  p <- parse_sample_name(sample)
+  case_when(
+    p$cell_type %in% params$cell_types_with_day ~ sprintf("%s_day%02d", p$cell_type, p$day),
+    TRUE ~ "PLTs" )}
+new_colnames <- make.unique(map_chr(colnames(zscores_df_prot), ~ rename_logic(.)))  # rename_logic()
+# Assign the new column names to your dataframe
+colnames(zscores_df_prot) <- new_colnames
+wgcna_impi<- wgcna_correlation[,1:4]
+tz <- t(zscores_df_prot)
+zscoresMeans1 <- data.frame(matrix(ncol = 0, nrow = ncol(zscores_df_prot)))
+rownames(zscoresMeans1) <- colnames(zscores_df_prot)  # one row per sample
+   ##Automatize it!
+modules <- unique(wgcna_correlation$ME)
+for (module in modules) {
+  module_columns <- which(grepl(module, wgcna_correlation$ME))
+  zscoresMeans <- rowMeans(tz[, module_columns])
+ zscoresMeans1[[paste0("ME", module)]] <- zscoresMeans}
+zscoresMeans2 <- t(zscoresMeans1)
+colnames(zscoresMeans2) <- new_colnames
 ######################################################
 ## Rcistarget  ##
 ######################################################
@@ -327,6 +417,7 @@ df_sigresults_cb_ <- sig_tests %>%
 ## Figure 2  ##
 ######################################################
 
+##Figure 2A
 
 ##Figure 2B
 Mks_annotations <- data.frame(
@@ -459,19 +550,474 @@ print(umap_gplot)
 pdf(file.path("plt_umap_plot.pdf"), width = 12, height = 6)
 print(umap_gplot, column_title = "")
 dev.off()
+##Figure 3B
+#per celltype comparison
+barplot_sig <- df_sigresults_day_comparison %>% 
+  gather("Significance_test", "Significant", -UID, -Protein.Group, -Protein.Ids, -Protein.Names, -Genes, -First.Protein.Description) %>% 
+  filter(Significant != 0) %>%
+  group_by(Significance_test) %>%
+  distinct(UID, Significant) %>%
+  dplyr::summarise(count = n(), .groups = "drop") %>%
+  dplyr::mutate(Significance_test = factor(Significance_test, levels = c("MPB_day5 - CB_day5","MPB_day8 - CB_day8","MPB_day11 - CB_day11","MPB_day14 - CB_day14"))) %>%  # Order bars
+  ggplot(aes(x = Significance_test, y = count)) +
+  geom_bar(stat = "identity", fill = "gray56", width = 0.7) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+    axis.title.x = element_text(size = 14, face = "bold"),
+    axis.title.y = element_text(size = 14, face = "bold"),
+    plot.title = element_text(hjust = 0.5, size = 12, face = "bold")
+  ) +
+  scale_y_continuous(limits = c(0,1500)) +
+  labs(
+    title = "Significance Plot",
+    x = "",
+    y = "Protein significant count"
+  )
+print(barplot_sig)
+ggsave( "barplot_significance_tests_per_cell_type.pdf", barplot_sig, width = 14, height = 12, dpi = 300)
+#per cb
+barplot_sig <- df_sigresults_cb %>% 
+  gather("Significance_test", "Significant", -UID, -Protein.Group, -Protein.Ids, -Protein.Names, -Genes, -First.Protein.Description) %>% 
+  filter(Significant != 0) %>%
+  group_by(Significance_test) %>%
+  distinct(UID, Significant) %>%
+  dplyr::summarise(count = n(), .groups = "drop") %>%
+  dplyr::mutate(Significance_test = factor(Significance_test, levels = c("CB_day8 - CB_day5","CB_day11 - CB_day5","CB_day14 - CB_day5"))) %>%  # Order bars
+  ggplot(aes(x = Significance_test, y = count)) +
+  geom_bar(stat = "identity", fill = "gray56", width = 0.7) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+    axis.title.x = element_text(size = 14, face = "bold"),
+    axis.title.y = element_text(size = 14, face = "bold"),
+    plot.title = element_text(hjust = 0.5, size = 12, face = "bold")
+  ) +
+  scale_y_continuous(limits = c(0,1500)) +
+  labs(
+    title = "Significance Plot",
+    x = "",
+    y = "Protein significant count"
+  )
+print(barplot_sig)
+ggsave( "barplot_significance_tests_per_cb.pdf", barplot_sig, width = 14, height = 12, dpi = 300)
+#per mpb
+barplot_sig <- df_sigresults_mpb %>% 
+  gather("Significance_test", "Significant", -UID, -Protein.Group, -Protein.Ids, -Protein.Names, -Genes, -First.Protein.Description) %>% 
+  filter(Significant != 0) %>%
+  group_by(Significance_test) %>%
+  distinct(UID, Significant) %>%
+  dplyr::summarise(count = n(), .groups = "drop") %>%
+  dplyr::mutate(Significance_test = factor(Significance_test, levels = c("MPB_day8 - MPB_day5","MPB_day11 - MPB_day5","MPB_day14 - MPB_day5"))) %>%  # Order bars
+  ggplot(aes(x = Significance_test, y = count)) +
+  geom_bar(stat = "identity", fill = "gray56", width = 0.7) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+    axis.title.x = element_text(size = 14, face = "bold"),
+    axis.title.y = element_text(size = 14, face = "bold"),
+    plot.title = element_text(hjust = 0.5, size = 12, face = "bold")
+  ) +
+  scale_y_continuous(limits = c(0,1500)) +
+  labs(
+    title = "Significance Plot",
+    x = "",
+    y = "Protein significant count"
+  )
+print(barplot_sig)
+ggsave( "barplot_significance_tests_per_mpb.pdf", barplot_sig, width = 14, height = 12, dpi = 300)
+
+##Figure 3C
+contrast_name <- colnames(contrast_matrix)[1]   #day5
+p_cut   <- 0.05
+lfc_cut <- 1
+n_label <- 15
+highlight_proteins <- NULL                         
+col_sig <- c("Up in MPB" = "#C0392B", "Up in CB" = "#2471A3", NS = "grey75")
+vdf <- limma::topTable(fit_ebayes, coef = contrast_name, number = Inf, sort.by = "none") %>%
+  tibble::rownames_to_column("UID") %>%
+  dplyr::left_join(df_uid_information2, by = "UID") %>%
+  dplyr::mutate(
+    Gene = sub(";.*", "", dplyr::coalesce(Genes, UID)),
+    sig  = dplyr::case_when(
+      adj.P.Val < p_cut & logFC >=  lfc_cut ~ "Up in MPB",
+      adj.P.Val < p_cut & logFC <= -lfc_cut ~ "Up in CB",
+      TRUE ~ "NS"),
+    sig = factor(sig, levels = c("Up in MPB", "Up in CB", "NS")))
+n_up   <- sum(vdf$sig == "Up in MPB")
+n_down <- sum(vdf$sig == "Up in CB")
+labels_df <- dplyr::bind_rows(
+  vdf %>% dplyr::filter(sig == "Up in MPB")   %>% dplyr::slice_min(adj.P.Val, n = n_label, with_ties = FALSE),
+  vdf %>% dplyr::filter(sig == "Up in CB") %>% dplyr::slice_min(adj.P.Val, n = n_label, with_ties = FALSE),
+  vdf %>% dplyr::filter(Gene %in% highlight_proteins)
+) %>% dplyr::distinct(UID, .keep_all = TRUE)
+x_lim <- ceiling(max(abs(vdf$logFC), na.rm = TRUE))
+y_max <- max(-log10(vdf$adj.P.Val), na.rm = TRUE)
+# Visualization
+volcano <- ggplot(vdf, aes(x = logFC, y = -log10(adj.P.Val))) +
+  geom_hline(yintercept = -log10(p_cut), linetype = "dashed", linewidth = 0.3, colour = "grey50") +
+  geom_vline(xintercept = c(-lfc_cut, lfc_cut), linetype = "dashed", linewidth = 0.3, colour = "grey50") +
+  geom_point(data = ~ dplyr::filter(.x, sig == "NS"),
+             colour = col_sig["NS"], size = 1.1, alpha = 0.6, stroke = 0) +
+  geom_point(data = ~ dplyr::filter(.x, sig != "NS"),
+             aes(fill = sig), shape = 21, colour = "white", stroke = 0.25, size = 2.2) +
+  ggrepel::geom_text_repel(
+    data = labels_df, aes(label = Gene, colour = sig),
+    size = 2.8, fontface = "italic",
+    min.segment.length = 0, segment.size = 0.25, segment.colour = "grey40",
+    box.padding = 0.35, point.padding = 0.15, max.overlaps = Inf, seed = 1,
+    show.legend = FALSE
+  ) +
+  annotate("text", x = x_lim, y = y_max, label = paste0(n_up, " up in MPB"),
+           hjust = 1, vjust = 1, size = 3.5, fontface = "bold", colour = col_sig["Up in MPB"]) +
+  annotate("text", x = -x_lim, y = y_max, label = paste0(n_down, " up in CB"),
+           hjust = 0, vjust = 1, size = 3.5, fontface = "bold", colour = col_sig["Up in CB"]) +
+  scale_fill_manual(values = col_sig, guide = "none") +
+  scale_colour_manual(values = col_sig, guide = "none") +
+  scale_x_continuous(limits = c(-x_lim, x_lim), breaks = scales::breaks_pretty(n = 7)) +
+  scale_y_continuous(expand = expansion(mult = c(0.01, 0.06))) +
+  labs(
+    x = expression(log[2]~"fold change"),
+    y = expression(-log[10]~"(adjusted "*italic(p)*")"),
+    title = contrast_name
+  ) +
+  theme_classic(base_size = 10, base_family = "Helvetica") +
+  theme(
+    plot.title   = element_text(face = "bold", hjust = 0.5, size = 11),
+    axis.title   = element_text(size = 10),
+    axis.text    = element_text(size = 9, colour = "black"),
+    axis.line    = element_line(linewidth = 0.4),
+    axis.ticks   = element_line(linewidth = 0.4),
+    plot.margin  = margin(6, 8, 6, 6)
+  )
+# Exporting
+file_stub <- gsub("[^A-Za-z0-9]+", "_", contrast_name)
+ggsave(paste0("Volcano_", file_stub, ".pdf"), volcano,
+       width = 89, height = 89, units = "mm", device = cairo_pdf)
+##Figure 3D
+contrast_name <- colnames(contrast_matrix)[2]   #day8
+p_cut   <- 0.05
+lfc_cut <- 1
+n_label <- 15
+highlight_proteins <- NULL                         
+col_sig <- c("Up in MPB" = "#C0392B", "Up in CB" = "#2471A3", NS = "grey75")
+vdf <- limma::topTable(fit_ebayes, coef = contrast_name, number = Inf, sort.by = "none") %>%
+  tibble::rownames_to_column("UID") %>%
+  dplyr::left_join(df_uid_information2, by = "UID") %>%
+  dplyr::mutate(
+    Gene = sub(";.*", "", dplyr::coalesce(Genes, UID)),
+    sig  = dplyr::case_when(
+      adj.P.Val < p_cut & logFC >=  lfc_cut ~ "Up in MPB",
+      adj.P.Val < p_cut & logFC <= -lfc_cut ~ "Up in CB",
+      TRUE ~ "NS"),
+    sig = factor(sig, levels = c("Up in MPB", "Up in CB", "NS")))
+n_up   <- sum(vdf$sig == "Up in MPB")
+n_down <- sum(vdf$sig == "Up in CB")
+labels_df <- dplyr::bind_rows(
+  vdf %>% dplyr::filter(sig == "Up in MPB")   %>% dplyr::slice_min(adj.P.Val, n = n_label, with_ties = FALSE),
+  vdf %>% dplyr::filter(sig == "Up in CB") %>% dplyr::slice_min(adj.P.Val, n = n_label, with_ties = FALSE),
+  vdf %>% dplyr::filter(Gene %in% highlight_proteins)
+) %>% dplyr::distinct(UID, .keep_all = TRUE)
+x_lim <- ceiling(max(abs(vdf$logFC), na.rm = TRUE))
+y_max <- max(-log10(vdf$adj.P.Val), na.rm = TRUE)
+# Visualization
+volcano <- ggplot(vdf, aes(x = logFC, y = -log10(adj.P.Val))) +
+  geom_hline(yintercept = -log10(p_cut), linetype = "dashed", linewidth = 0.3, colour = "grey50") +
+  geom_vline(xintercept = c(-lfc_cut, lfc_cut), linetype = "dashed", linewidth = 0.3, colour = "grey50") +
+  geom_point(data = ~ dplyr::filter(.x, sig == "NS"),
+             colour = col_sig["NS"], size = 1.1, alpha = 0.6, stroke = 0) +
+  geom_point(data = ~ dplyr::filter(.x, sig != "NS"),
+             aes(fill = sig), shape = 21, colour = "white", stroke = 0.25, size = 2.2) +
+  ggrepel::geom_text_repel(
+    data = labels_df, aes(label = Gene, colour = sig),
+    size = 2.8, fontface = "italic",
+    min.segment.length = 0, segment.size = 0.25, segment.colour = "grey40",
+    box.padding = 0.35, point.padding = 0.15, max.overlaps = Inf, seed = 1,
+    show.legend = FALSE
+  ) +
+  annotate("text", x = x_lim, y = y_max, label = paste0(n_up, " up in MPB"),
+           hjust = 1, vjust = 1, size = 3.5, fontface = "bold", colour = col_sig["Up in MPB"]) +
+  annotate("text", x = -x_lim, y = y_max, label = paste0(n_down, " up in CB"),
+           hjust = 0, vjust = 1, size = 3.5, fontface = "bold", colour = col_sig["Up in CB"]) +
+  scale_fill_manual(values = col_sig, guide = "none") +
+  scale_colour_manual(values = col_sig, guide = "none") +
+  scale_x_continuous(limits = c(-x_lim, x_lim), breaks = scales::breaks_pretty(n = 7)) +
+  scale_y_continuous(expand = expansion(mult = c(0.01, 0.06))) +
+  labs(
+    x = expression(log[2]~"fold change"),
+    y = expression(-log[10]~"(adjusted "*italic(p)*")"),
+    title = contrast_name
+  ) +
+  theme_classic(base_size = 10, base_family = "Helvetica") +
+  theme(
+    plot.title   = element_text(face = "bold", hjust = 0.5, size = 11),
+    axis.title   = element_text(size = 10),
+    axis.text    = element_text(size = 9, colour = "black"),
+    axis.line    = element_line(linewidth = 0.4),
+    axis.ticks   = element_line(linewidth = 0.4),
+    plot.margin  = margin(6, 8, 6, 6)
+  )
+# Exporting
+file_stub <- gsub("[^A-Za-z0-9]+", "_", contrast_name)
+ggsave(paste0("Volcano_", file_stub, ".pdf"), volcano,
+       width = 89, height = 89, units = "mm", device = cairo_pdf)
+##Figure 3E
+contrast_name <- colnames(contrast_matrix)[3]   #day11
+p_cut   <- 0.05
+lfc_cut <- 1
+n_label <- 15
+highlight_proteins <- NULL                         
+col_sig <- c("Up in MPB" = "#C0392B", "Up in CB" = "#2471A3", NS = "grey75")
+vdf <- limma::topTable(fit_ebayes, coef = contrast_name, number = Inf, sort.by = "none") %>%
+  tibble::rownames_to_column("UID") %>%
+  dplyr::left_join(df_uid_information2, by = "UID") %>%
+  dplyr::mutate(
+    Gene = sub(";.*", "", dplyr::coalesce(Genes, UID)),
+    sig  = dplyr::case_when(
+      adj.P.Val < p_cut & logFC >=  lfc_cut ~ "Up in MPB",
+      adj.P.Val < p_cut & logFC <= -lfc_cut ~ "Up in CB",
+      TRUE ~ "NS"),
+    sig = factor(sig, levels = c("Up in MPB", "Up in CB", "NS")))
+n_up   <- sum(vdf$sig == "Up in MPB")
+n_down <- sum(vdf$sig == "Up in CB")
+labels_df <- dplyr::bind_rows(
+  vdf %>% dplyr::filter(sig == "Up in MPB")   %>% dplyr::slice_min(adj.P.Val, n = n_label, with_ties = FALSE),
+  vdf %>% dplyr::filter(sig == "Up in CB") %>% dplyr::slice_min(adj.P.Val, n = n_label, with_ties = FALSE),
+  vdf %>% dplyr::filter(Gene %in% highlight_proteins)
+) %>% dplyr::distinct(UID, .keep_all = TRUE)
+x_lim <- ceiling(max(abs(vdf$logFC), na.rm = TRUE))
+y_max <- max(-log10(vdf$adj.P.Val), na.rm = TRUE)
+# Visualization
+volcano <- ggplot(vdf, aes(x = logFC, y = -log10(adj.P.Val))) +
+  geom_hline(yintercept = -log10(p_cut), linetype = "dashed", linewidth = 0.3, colour = "grey50") +
+  geom_vline(xintercept = c(-lfc_cut, lfc_cut), linetype = "dashed", linewidth = 0.3, colour = "grey50") +
+  geom_point(data = ~ dplyr::filter(.x, sig == "NS"),
+             colour = col_sig["NS"], size = 1.1, alpha = 0.6, stroke = 0) +
+  geom_point(data = ~ dplyr::filter(.x, sig != "NS"),
+             aes(fill = sig), shape = 21, colour = "white", stroke = 0.25, size = 2.2) +
+  ggrepel::geom_text_repel(
+    data = labels_df, aes(label = Gene, colour = sig),
+    size = 2.8, fontface = "italic",
+    min.segment.length = 0, segment.size = 0.25, segment.colour = "grey40",
+    box.padding = 0.35, point.padding = 0.15, max.overlaps = Inf, seed = 1,
+    show.legend = FALSE
+  ) +
+  annotate("text", x = x_lim, y = y_max, label = paste0(n_up, " up in MPB"),
+           hjust = 1, vjust = 1, size = 3.5, fontface = "bold", colour = col_sig["Up in MPB"]) +
+  annotate("text", x = -x_lim, y = y_max, label = paste0(n_down, " up in CB"),
+           hjust = 0, vjust = 1, size = 3.5, fontface = "bold", colour = col_sig["Up in CB"]) +
+  scale_fill_manual(values = col_sig, guide = "none") +
+  scale_colour_manual(values = col_sig, guide = "none") +
+  scale_x_continuous(limits = c(-x_lim, x_lim), breaks = scales::breaks_pretty(n = 7)) +
+  scale_y_continuous(expand = expansion(mult = c(0.01, 0.06))) +
+  labs(
+    x = expression(log[2]~"fold change"),
+    y = expression(-log[10]~"(adjusted "*italic(p)*")"),
+    title = contrast_name
+  ) +
+  theme_classic(base_size = 10, base_family = "Helvetica") +
+  theme(
+    plot.title   = element_text(face = "bold", hjust = 0.5, size = 11),
+    axis.title   = element_text(size = 10),
+    axis.text    = element_text(size = 9, colour = "black"),
+    axis.line    = element_line(linewidth = 0.4),
+    axis.ticks   = element_line(linewidth = 0.4),
+    plot.margin  = margin(6, 8, 6, 6)
+  )
+# Exporting
+file_stub <- gsub("[^A-Za-z0-9]+", "_", contrast_name)
+ggsave(paste0("Volcano_", file_stub, ".pdf"), volcano,
+       width = 89, height = 89, units = "mm", device = cairo_pdf)
+##Figure 3F 
+contrast_name <- colnames(contrast_matrix)[4]   #day14
+p_cut   <- 0.05
+lfc_cut <- 1
+n_label <- 15
+highlight_proteins <- NULL                         
+col_sig <- c("Up in MPB" = "#C0392B", "Up in CB" = "#2471A3", NS = "grey75")
+vdf <- limma::topTable(fit_ebayes, coef = contrast_name, number = Inf, sort.by = "none") %>%
+  tibble::rownames_to_column("UID") %>%
+  dplyr::left_join(df_uid_information2, by = "UID") %>%
+  dplyr::mutate(
+    Gene = sub(";.*", "", dplyr::coalesce(Genes, UID)),
+    sig  = dplyr::case_when(
+      adj.P.Val < p_cut & logFC >=  lfc_cut ~ "Up in MPB",
+      adj.P.Val < p_cut & logFC <= -lfc_cut ~ "Up in CB",
+      TRUE ~ "NS"),
+    sig = factor(sig, levels = c("Up in MPB", "Up in CB", "NS")))
+n_up   <- sum(vdf$sig == "Up in MPB")
+n_down <- sum(vdf$sig == "Up in CB")
+labels_df <- dplyr::bind_rows(
+  vdf %>% dplyr::filter(sig == "Up in MPB")   %>% dplyr::slice_min(adj.P.Val, n = n_label, with_ties = FALSE),
+  vdf %>% dplyr::filter(sig == "Up in CB") %>% dplyr::slice_min(adj.P.Val, n = n_label, with_ties = FALSE),
+  vdf %>% dplyr::filter(Gene %in% highlight_proteins)
+) %>% dplyr::distinct(UID, .keep_all = TRUE)
+x_lim <- ceiling(max(abs(vdf$logFC), na.rm = TRUE))
+y_max <- max(-log10(vdf$adj.P.Val), na.rm = TRUE)
+# Visualization
+volcano <- ggplot(vdf, aes(x = logFC, y = -log10(adj.P.Val))) +
+  geom_hline(yintercept = -log10(p_cut), linetype = "dashed", linewidth = 0.3, colour = "grey50") +
+  geom_vline(xintercept = c(-lfc_cut, lfc_cut), linetype = "dashed", linewidth = 0.3, colour = "grey50") +
+  geom_point(data = ~ dplyr::filter(.x, sig == "NS"),
+             colour = col_sig["NS"], size = 1.1, alpha = 0.6, stroke = 0) +
+  geom_point(data = ~ dplyr::filter(.x, sig != "NS"),
+             aes(fill = sig), shape = 21, colour = "white", stroke = 0.25, size = 2.2) +
+  ggrepel::geom_text_repel(
+    data = labels_df, aes(label = Gene, colour = sig),
+    size = 2.8, fontface = "italic",
+    min.segment.length = 0, segment.size = 0.25, segment.colour = "grey40",
+    box.padding = 0.35, point.padding = 0.15, max.overlaps = Inf, seed = 1,
+    show.legend = FALSE
+  ) +
+  annotate("text", x = x_lim, y = y_max, label = paste0(n_up, " up in MPB"),
+           hjust = 1, vjust = 1, size = 3.5, fontface = "bold", colour = col_sig["Up in MPB"]) +
+  annotate("text", x = -x_lim, y = y_max, label = paste0(n_down, " up in CB"),
+           hjust = 0, vjust = 1, size = 3.5, fontface = "bold", colour = col_sig["Up in CB"]) +
+  scale_fill_manual(values = col_sig, guide = "none") +
+  scale_colour_manual(values = col_sig, guide = "none") +
+  scale_x_continuous(limits = c(-x_lim, x_lim), breaks = scales::breaks_pretty(n = 7)) +
+  scale_y_continuous(expand = expansion(mult = c(0.01, 0.06))) +
+  labs(
+    x = expression(log[2]~"fold change"),
+    y = expression(-log[10]~"(adjusted "*italic(p)*")"),
+    title = contrast_name
+  ) +
+  theme_classic(base_size = 10, base_family = "Helvetica") +
+  theme(
+    plot.title   = element_text(face = "bold", hjust = 0.5, size = 11),
+    axis.title   = element_text(size = 10),
+    axis.text    = element_text(size = 9, colour = "black"),
+    axis.line    = element_line(linewidth = 0.4),
+    axis.ticks   = element_line(linewidth = 0.4),
+    plot.margin  = margin(6, 8, 6, 6)
+  )
+# Exporting
+file_stub <- gsub("[^A-Za-z0-9]+", "_", contrast_name)
+ggsave(paste0("Volcano_", file_stub, ".pdf"), volcano,
+       width = 89, height = 89, units = "mm", device = cairo_pdf)
+
 
 ######################################################
 ## Figure 4  ##
 ######################################################
+##Figure 4A
+column_order <- order(colnames(zscoresMeans2))
+column_split_df <- data.frame(
+  names= colnames(zscoresMeans2)
+)
+
+df_combined <- column_split_df %>%
+  dplyr::mutate(Split = gsub("^([A-Za-z]+)[0-9]+(_day[0-9]+)$", "\\1\\2", names))
+colnames(zscoresMeans2)
+# Create the heatmap
+# order
+desired_split_order <- c("CB_day05", "CB_day08", "CB_day11", "CB_day14","MPB_day05", "MPB_day08", "MPB_day11", "MPB_day14")
+column_split <- factor(df_combined$Split, levels = desired_split_order)
+col_fun_zscoresMeans2 <- colorRamp2(
+  c(min(zscoresMeans2, na.rm = TRUE), 0, max(zscoresMeans2, na.rm = TRUE)),
+  c("blue", "white", "red")
+)
+
+ht1 <- Heatmap(
+  (zscoresMeans2),
+  name = "z-score",
+ col = col_fun_zscoresMeans2,
+  column_order = column_order,
+ cluster_column_slices = TRUE,
+  show_row_names = TRUE,
+  show_column_names = F,
+  show_column_dend = FALSE,
+  show_row_dend = TRUE,
+ row_dend_width = unit(3,"cm"),
+ # guards against fewer rows (WGCNA modules) than requested clusters -- the module count
+ # from dynamicTreeCut isn't fully deterministic run-to-run, so this isn't safe to hardcode
+ row_km = min(5, nrow(zscoresMeans2)),
+ column_split = column_split,
+  column_names_side = 'bottom',
+  heatmap_legend_param = list(
+    title = "z-score",
+    legend_direction = "vertical",
+    heatmap_legend_side = "bottom",
+    annotation_legend_side = "bottom",
+    legend_width = unit(2, "cm")
+  )
+)
+# Save the heatmap to a PDF file
+pdf(file.path(output_dir, "heatmap_zscores_no_pearson.pdf"), width = 8, height = 5)
+draw(ht1, column_title = "")
+dev.off()
+
+##Figure 4B
+df_uid_information <- df_uid_information
+enztrezid_gene <- clusterProfiler::bitr(geneID =df_uid_information$Protein.Group, fromType = "UNIPROT", toType = "ENTREZID", OrgDb = "org.Hs.eg.db") %>%
+  magrittr::set_colnames(c("Protein.Group", "ENTREZID"))
+#clusters
+wgcna_correlation$UID <- wgcna_correlation$Protein.Group
+cluster_prepare <- wgcna_correlation %>%
+  dplyr::select(UID, ME) %>%
+  left_join(df_uid_information) %>%
+  left_join(enztrezid_gene, "Protein.Group")
+# Convert to data.table
+dt_cluster_prepare <- as.data.table(cluster_prepare)
+dt_cluster_prepare <- dt_cluster_prepare[!is.na(ENTREZID), .(ME, ENTREZID)]
+dt_cluster_prepare[, ME := paste("ME", ME, sep = "")]
+dt_cluster_prepare[, row_id := 1:.N, by = ME]
+dt_spread <- data.table::dcast(dt_cluster_prepare, row_id ~ ME, value.var = "ENTREZID") 
+cluster_annotation <- as.list(dt_spread[, -"row_id", with = FALSE])
+cluster_annotation <- lapply(cluster_annotation, function(x) x[!is.na(x)])
+#BP
+clusters <- clusterProfiler::compareCluster(geneClusters = cluster_annotation, 
+                             fun = "enrichGO", ont = "BP",
+                              universe = unique(cluster_prepare$ENTREZID), 
+                              OrgDb = org.Hs.eg.db,
+                              pvalueCutoff = 0.05, 
+                               readable = T
+                                )
+#CC
+clusters2 <- clusterProfiler::compareCluster(geneClusters = cluster_annotation, 
+                             fun = "enrichGO", ont = "CC",
+                              universe = unique(cluster_prepare$ENTREZID), 
+                              OrgDb = org.Hs.eg.db,
+                              pvalueCutoff = 0.05, 
+                               readable = T
+                                )
+#MF
+clusters3 <- clusterProfiler::compareCluster(geneClusters = cluster_annotation,
+                             fun = "enrichGO", ont = "MF",
+                              universe = unique(cluster_prepare$ENTREZID),
+                              OrgDb = org.Hs.eg.db,
+                              pvalueCutoff = 0.05,
+                               readable = T
+                                )
+
+df_bp <- as.data.frame(clusters@compareClusterResult)
+df_cc <- as.data.frame(clusters2@compareClusterResult)
+df_mf <- as.data.frame(clusters3@compareClusterResult)
+df_bp$GOtype <- "BP"
+df_cc$GOtype <- "CC"
+df_mf$GOtype <- "MF"
+df_all <- bind_rows(df_bp, df_cc, df_mf)
+ write.csv(df_all, file="GO_enrichemnt_modules_for_cytoscape.csv")     # Export to table for cytoscape
+##Figure 4C
+##Figure 4D
 
 
 
+
+
+
+
+######################################################
+## Thom & Stokhuijzen et al dataset inclusion ##
+######################################################
 
 
 ######################################################
 ## Figure 5  ##
 ######################################################
-
+##Figure 5A
+##Figure 5B
+##Figure 5C
 
 
 
