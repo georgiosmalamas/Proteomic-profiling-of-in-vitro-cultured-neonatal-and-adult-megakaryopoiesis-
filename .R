@@ -408,17 +408,151 @@ colnames(zscoresMeans2) <- new_colnames
 ######################################################
 ## Rcistarget  ##
 ######################################################
-
-
-
-
-
+motifAnnotations_hgnc <- "hg38_10kbp_up_10kbp_down_full_tx_v10_clust.genes_vs_motifs.rankings.feather" # download it first
+#for cluster 1
+selected_me <- c("1","3,"7)  
+#for cluster 4
+selected_me <- c("2","4")  
+#for cluster 3
+selected_me <- c("6")  
+#for cluster 2
+selected_me <- c("8")  
+#for cluster 5
+selected_me <- c("5","9")  
+#after selecting the peroper cluster 
+Selected_proteins_for_tf_enrich <- wgcna_correlation %>%
+  dplyr::filter(ME %in% selected_me)
+mygenes <- Selected_proteins_for_tf_enrich$Genes
+ # Select motif database to use (i.e. organism and distance around TSS)
+ data(motifAnnotations_hgnc)
+ motifRankings <- importRankings(motif_rankings_path) 
+ # Motif enrichment analysis:
+ motifEnrichmentTable_wGenes <- cisTarget(mygenes, motifRankings, motifAnnot=motifAnnotations_hgnc)
+ motifEnrichmentTable_wGenes_wLogo <- addLogo(motifEnrichmentTable_wGenes)
+resultsSubset <- motifEnrichmentTable_wGenes_wLogo[1:20,]
+datatable(resultsSubset[,-c("enrichedGenes", "TF_inferred"), with=FALSE], 
+          escape = FALSE, # To show the logo
+          filter="top", options=list(pageLength=10))
+ # Select top 25 motifs by nEnrGenes
+top_motifs <- motifEnrichmentTable_wGenes %>%
+  arrange(desc(NES)) %>%
+  head(25)
+# Select top 10 motifs by nEnrGenes
+#top_motifs <- TFenrichment_3d1 %>%
+ # arrange(desc(NES)) %>%
+# Reorder factor levels for nice descending bars
+top_motifs <- top_motifs %>%
+  arrange(desc(nEnrGenes)) 
+# Create the bar plot
+ pg <- ggplot(top_motifs, aes(x = motif, y = nEnrGenes, fill = motif)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +  # horizontal bars
+  labs(x = "Motif", y = "Number of Enriched Proteins", title = "Top 10 Motifs") +
+  theme_minimal() +
+  scale_fill_manual(values = rep("darkorange3", nrow(top_motifs))) +
+  theme(axis.text = element_text(size = 6),
+        axis.title = element_text(size = 14))
+ggsave(file.path("top25 motifs.pdf"), plot = pg, width = 8, height = 6)
+tf_cleaned <- top_motifs %>%
+  filter(!is.na(TF_highConf)) %>%
+  mutate(TF_highConf = str_replace_all(TF_highConf, "\\(.*?\\)", "")) %>%  # remove (directAnnotation)
+  mutate(TF_highConf = str_replace_all(TF_highConf, "\\..*", "")) %>%     # remove after .
+  separate_rows(TF_highConf, sep = "[;,\\s]+") %>%                        # split on ; , or space
+  dplyr::rename(TF = TF_highConf) %>%
+  filter(TF != "") %>%
+  distinct(motif, TF, .keep_all = TRUE) # remove empty entries
+motif_order <- tf_cleaned %>%
+  dplyr::count(motif, sort = TRUE) %>%
+  pull(motif)
+tf_filtered <- tf_cleaned %>%
+  mutate(motif = factor(motif, levels = motif_order))
+#save for different clusters 
+write.xlsx(tf_filtered, file = file.path( "TFenrichment_pattern_1.xlsx"))
+write.xlsx(tf_filtered, file = file.path( "TFenrichment_pattern_2.xlsx"))
+write.xlsx(tf_filtered, file = file.path( "TFenrichment_pattern_3.xlsx"))
+write.xlsx(tf_filtered, file = file.path( "TFenrichment_pattern_4.xlsx"))
+write.xlsx(tf_filtered, file = file.path( "TFenrichment_pattern_5.xlsx"))
+ggplot(tf_filtered, aes(x = motif, y = TF)) +
+  geom_point(aes(size = nEnrGenes, color = NES)) +
+  scale_color_viridis_c(option = "inferno") +
+  scale_size(range = c(2, 10)) +
+  labs(
+    title = "Dot Plot: TF vs Motif NES",
+    x = "Motif",
+    y = "Transcription Factor",
+    size = "Enriched genes",
+    color = "NES"
+  ) +
+  theme_minimal(base_size = 4) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major = element_line(color = "grey90"),
+    panel.grid.minor = element_blank()
+  )
+ggplot(tf_filtered,
+       aes(axis1 = TF, axis2 = motif, y = nEnrGenes)) +
+  geom_alluvium(aes(fill = motif), width = 1/12) +
+  geom_stratum() +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum))) +
+  scale_fill_viridis_d() +
+  theme_minimal() +
+  labs(title = "Motif–TF Alluvial Diagram", y = "NES")
+ ggplot(tf_filtered,
+       aes(axis1 = TF, axis2 = motif, y = nEnrGenes)) +
+  geom_alluvium(aes(fill = motif), width = 0.15, alpha = 0.7, knot.pos = 0.5) +
+  geom_stratum(fill = "grey92", color = "black") +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum)), size = 3.5, family = "sans") +
+  scale_fill_viridis_d(option = "B", begin = 0.01, end = 0.9) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.title = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    legend.position = "none",
+    plot.title = element_text(face = "bold", size = 14),
+    plot.margin = margin(5, 10, 20, 5)  # tighten left margin here
+  ) +
+  labs(
+    title = "Transcription Factors Linked to Regulatory Motifs",
+    subtitle = "Flow width ∝ number of enriched genes (nEnrGenes)"
+  ) 
+dotplot <- ggplot(tf_filtered, aes(x = motif, y = TF)) +
+  geom_point(aes(size = nEnrGenes, color = NES), shape = 21, stroke = 2) +  # thicker border
+  scale_color_viridis(option = "rocket", direction = -1, name = "NES") +
+  scale_size_continuous(range = c(2.5, 9), name = "nEnrGenes") +
+  labs(
+    title = "TF–Motif Interactions",
+    x = "Motif",
+    y = "Transcription Factor"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 9),  # smaller x-axis
+    axis.text.y = element_text(size = 8.5, face = "bold"),  # bold TFs
+    panel.grid.major = element_line(color = "grey90"),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11),
+    legend.position = "right",
+    plot.margin = margin(10, 10, 10, 10)
+  )
+# Save it
+ggsave(file.path("tf_motif_dotplot.pdf"), plot = dotplot, width = 12, height = 18)
+TFenrichment_pattern_1 <- read_excel("TFenrichment_pattern_1.xlsx")
+TFenrichment_pattern_2 <- read_excel("TFenrichment_pattern_2.xlsx")
+TFenrichment_pattern_3 <- read_excel("TFenrichment_pattern_3.xlsx")
+TFenrichment_pattern_4 <- read_excel("TFenrichment_pattern_4.xlsx")
+TFenrichment_pattern_5 <- read_excel("TFenrichment_pattern_5.xlsx")
+# unique tfs per pattern
+uniqueTFs_1 <- unique(TFenrichment_pattern_1$TF)
+uniqueTFs_2 <- unique(TFenrichment_pattern_2$TF)
+uniqueTFs_3 <- unique(TFenrichment_pattern_3$TF)
+uniqueTFs_4 <- unique(TFenrichment_pattern_4$TF)
+uniqueTFs_5 <- unique(TFenrichment_pattern_5$TF)
 ######################################################
 ## Figure 2  ##
 ######################################################
-
-##Figure 2A
-
 ##Figure 2B
 Mks_annotations <- data.frame(
   Proteins = c("RUNX1", "GATA1","GF1B",       
@@ -496,12 +630,69 @@ plot_abundance <- df_summary %>%
   )
 # Save
 ggsave(file.path( "abundance_ranking_by_celltype.pdf"), plot_abundance, width = 12, height = 8, dpi = 300)
-
-
-
-
-
-
+##Figure 2C
+zscores_prepare <- df_prot_imp %>%
+  as.data.frame() %>%
+  column_to_rownames('UID') %>%
+  dplyr::select(matches('_')) %>%
+  as.data.frame() %>%
+  rownames_to_column(var='UID') %>%
+  left_join(df_uid_information2) %>%
+  subset(Genes %in% c("ABCG5","ABCG8","ACTB","ACTN1", "ANKRD26","CDC42", "CYCS","DIAPH1", "ETV6", "FLI1","FLNA", "FYB1", "GATA1", "GP1BA", "GP1BB", "GP9", "HOXA11", "IKZF5","KDSR","MECOM", "MPIG6B", "NBEAL2", "PLAU", "RAP1B", "RBM8A", "RUNX1","SRC", "STIM1", "TBXAS1", "THPO", "TPM4","TUBB1", "WAS" )) %>% 
+  as.data.frame() %>%
+  dplyr::select(-c('Protein.Group', 'Protein.Ids', 'Protein.Names','First.Protein.Description', 'UID')) 
+rownames(zscores_prepare) <- as.matrix(zscores_prepare$Genes)
+zscores_prepare <-zscores_prepare[, 1:(ncol(zscores_prepare)-1)]
+column_order <- order(colnames(zscores_prepare))
+range(zscores_prepare, na.rm = TRUE)   
+mat <- zscores_prepare %>%
+  as.data.frame() %>%             
+  mutate_all(as.numeric)
+new_colnames<- map_chr(colnames(mat), ~ rename_logic(.))
+colnames(mat) <- make.unique(new_colnames)  
+column_order <- order(colnames(mat))
+col_fun <- colorRamp2(
+  breaks = seq(min(mat, na.rm = TRUE), max(mat, na.rm = TRUE), length.out = 5),
+  colors = viridis::viridis(5)
+)
+# Convert mat to long format
+df_long <- as.data.frame(mat) %>%
+  rownames_to_column(var = "Gene") %>%
+  pivot_longer(
+    cols = -Gene,
+    names_to = "Sample",
+    values_to = "LFQ"
+  )
+# groups based on column names
+df_long <- df_long %>%
+  mutate(ColumnGroup = case_when(
+    grepl("CB", Sample) ~ "CB",
+    grepl("MPB", Sample) ~ "MPB",
+    TRUE ~ "Other"
+  ))
+km_res <- kmeans(mat, centers = 6)
+df_long <- df_long %>%
+  dplyr::mutate(Cluster = factor(km_res$cluster[Gene]))
+# Visualization
+t <- ggplot(df_long, aes(x = Sample, y = Gene)) +
+  geom_point(aes(fill = LFQ, size = LFQ), shape = 21, color = "black") +
+  scale_fill_viridis_c(option = "D") +
+  #scale_size(range = c(2, 6)) +
+  facet_wrap(~ Cluster, scales = "free_y", ncol = 1) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    panel.grid = element_blank()
+  )
+ggsave(
+  filename = "LFQ_circle_heatmap.pdf",
+  plot = t,
+  device = cairo_pdf,
+  width = 18,
+  height = 18,
+  units = "in",
+  dpi = 600
+)
 
 ######################################################
 ## Figure 3  ##
@@ -999,8 +1190,37 @@ df_mf$GOtype <- "MF"
 df_all <- bind_rows(df_bp, df_cc, df_mf)
  write.csv(df_all, file="GO_enrichemnt_modules_for_cytoscape.csv")     # Export to table for cytoscape
 ##Figure 4C
-##Figure 4D
-
+venn_input <- list(
+  `Cluster 1` = uniqueTFs_1,
+  `Cluster 2` = uniqueTFs_2,
+  `Cluster 3` = uniqueTFs_3,
+  `Cluster 4` = uniqueTFs_4,
+  `Cluster 5` = uniqueTFs_5
+)
+fit <- euler(venn_input, shape = "ellipse")
+p <- plot(
+  fit,
+  fills = list(
+    fill = c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#D55E00"),
+    alpha = 0.5
+  ),
+  edges = FALSE, 
+  quantities = list(
+    col = "black",
+    font = 2,
+    cex = 1.2
+  ),
+  labels = TRUE  
+)
+# Convert to ggplot and manually add labels
+p <- as_ggplot(p) +
+  annotate("text", x = 0.2, y = 0.9, label = "Cluster 1", size = 5, fontface = "bold") +
+  annotate("text", x = 0.8, y = 0.9, label = "Cluster 2", size = 5, fontface = "bold") +
+  annotate("text", x = 0.5, y = 0.1, label = "Cluster 3", size = 5, fontface = "bold") +
+  annotate("text", x = 0.1, y = 0.5, label = "Cluster 4", size = 5, fontface = "bold") +
+  annotate("text", x = 0.9, y = 0.5, label = "Cluster 5", size = 5, fontface = "bold") +
+  theme_void()
+ ##Figure 4D
 # Data
 df_bar <- data.frame(
   Group = c("a", "b", "c", "d", "e"),
@@ -1038,14 +1258,216 @@ ggsave( filename = "TFS_barplot.pdf",  plot = TF_barplot, device = cairo_pdf, wi
 ######################################################
 ## Thom & Stokhuijzen et al dataset inclusion ##
 ######################################################
-
-
+#import stokhuizen data
+stokhuizen_data <- read_excel("pr7b00298_si_002.xlsx",skip = 6)
+#import thom data
+thom_data <- read_excel("1-s2.0-S1538783623009248-mmc1.xlsx", sheet = 2)
+#significant proteins at thom et al
+thom_data_sig <- thom_data %>%
+  dplyr::mutate(abs_logFC = abs(logFC)) %>%
+  dplyr::filter(adj.P.Val <0.05 ) %>%
+  dplyr::filter(abs_logFC >0.585) #FC=1.5
+#significant proteins at stockhuizen et al
+stokhuizen_data_sig <- stokhuizen_data %>%
+  dplyr::filter(`Significant?`== "YES")
+                             
 ######################################################
 ## Figure 5  ##
 ######################################################
 ##Figure 5A
+fit <- euler(
+  list(
+    Thom = unique(thom_data_sig$Protein),
+    Stokhuizen = unique(stokhuizen_data_sig$`Gene name`),
+    Our_dataset =unique(df_sigresults_day_comparison_for_end_stage$Genes)
+  )
+)
+my_edges <- c("black", "black", "red3")   # one colour per set
+pdf("plt_sig_proteome_overlap_outline.pdf", width = 10, height = 10)
+plot(
+  fit,
+  fills      = FALSE,
+  edges      = list(col = my_edges, lex = 2),
+  labels     = list(font = 2, cex = 1.4, col = my_edges),
+  quantities = list(type = "counts", cex = 1.3, col = "grey15"),
+  main       = list(label = "Proteome Overlap", cex = 1.6, font = 2)
+)
+dev.off()
 ##Figure 5B
+# Common to all three
+common_all <- Reduce(intersect, sets)
+
+# Pairwise (includes the ones that are also in the third set)
+intersect(sets$Thom, sets$Stokhuizen)
+intersect(sets$Thom, sets$Our_dataset)
+intersect(sets$Stokhuizen, sets$Our_dataset)
+# In all three datasets
+in_all <- Reduce(intersect, sets)
+# Our dataset + one other (and not the third)
+our_thom_only <- setdiff(intersect(sets$Our_dataset, sets$Thom), sets$Stokhuizen)
+our_stok_only <- setdiff(intersect(sets$Our_dataset, sets$Stokhuizen), sets$Thom)
+# Our proteins found in at least one other dataset (all three + the two groups above)
+our_with_any <- intersect(sets$Our_dataset, union(sets$Thom, sets$Stokhuizen))
+shared <- data.frame(
+  Gene          = our_with_any,
+  In_Thom       = our_with_any %in% sets$Thom,
+  In_Stokhuizen = our_with_any %in% sets$Stokhuizen
+)
+shared$Datasets <- ifelse(shared$In_Thom & shared$In_Stokhuizen, "All three",
+                   ifelse(shared$In_Thom, "Our + Thom", "Our + Stokhuizen"))
+table(shared$Datasets)
+write.csv(shared[order(shared$Datasets), ], "our_shared_proteins.csv", row.names = FALSE)
+ # Continue in cytoscape                          
 ##Figure 5C
+src_cols <- c(CB = "purple", MPB = "darkorange")
+n_col    <- 3
+font_fam <- "Helvetica"                   
+# Thom and Stokhuizen fold changes 
+# Plotted so that positive = higher in adult (MPB/APB), matching our MPB - CB contrasts
+thom_flip <- FALSE      # TRUE if Thom's logFC is CB vs adult (check with fetal markers)
+stok_flip <- FALSE      # Stokhuizen is CB vs APB -> flip
+clean_gene <- function(x) toupper(trimws(x))
+lit_fc <- dplyr::bind_rows(
+  thom_data_sig %>%
+    dplyr::transmute(Gene = Protein, study = "Thom",
+                     log2FC = if (thom_flip) -logFC else logFC),
+  stokhuizen_data_sig %>%
+    dplyr::transmute(Gene = `Gene name`, study = "Stokhuizen",
+                     log2FC = if (stok_flip) -logFC else logFC)
+) %>%
+  tidyr::separate_rows(Gene, sep = "[;,]") %>%
+  dplyr::mutate(Gene = clean_gene(Gene)) %>%
+  dplyr::filter(is.finite(log2FC)) %>%
+  dplyr::group_by(Gene, study) %>%
+  dplyr::slice_max(abs(log2FC), n = 1, with_ties = FALSE) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(study = factor(study, levels = c("Thom", "Stokhuizen")))
+# proteins that we care
+  proteins_of_interest <- c("EZR", "RTN1", "RAP1B", "VWF", "IGF2BP3", "MARCKS","IGF2BP3")
+pattern <- paste0("\\b(", paste(proteins_of_interest, collapse = "|"), ")\\b")
+df_prot_imp3_subset <- df_prot_imp3[grep(pattern, df_prot_imp3$proteins), ]
+selected_proteins <- df_prot_imp3_subset %>% 
+              dplyr::select(- proteins)
+rownames(selected_proteins) <- df_prot_imp3_subset$proteins
+colnames(selected_proteins)
+selected_proteins$proteins <- rownames(selected_proteins)
+df_long <- reshape2::melt(selected_proteins)
+group_parsed_1 <- parse_sample_name(df_long$variable)
+df_long <- df_long %>%
+  dplyr::mutate(Group = case_when(
+    group_parsed_1$cell_type %in% params$cell_types_no_day ~ "Platelets",
+    group_parsed_1$cell_type %in% params$cell_types_with_day ~ paste0(group_parsed_1$cell_type, "_Day", group_parsed_1$day),
+    TRUE ~ "OTHER"
+  ))
+df_long <- df_long %>%
+  mutate(FacetGroup = case_when(
+    Group %in% c( "CB_Day14") ~ "1st point",
+    Group %in% c("MPB_Day14") ~ "2nd point",
+    Group %in% c("Platelets") ~ "Platelets",
+    TRUE ~ "Other"
+  ))
+# Define the desired order of group names
+desired_order <- c("CB_Day5", "CB_Day8", "CB_Day11", "CB_Day14", "MPB_Day5", "MPB_Day8", "MPB_Day11", "MPB_Day14","Platelets", "OTHER")
+df_long <- df_long %>%
+  arrange(factor(Group, levels = desired_order)) %>% 
+      dplyr::mutate(value = ifelse(is.na(value), 0, value))
+# Filter df_long to include only the selected facet groups
+filtered_positions <- df_long %>%
+  #filter(Group %in% selected_groups) %>%
+  dplyr::mutate(x_position = as.numeric(as.factor(Group))) %>% 
+  filter(Group %in% selected_groups) %>% # Convert Group to numeric positions
+  dplyr::select(Group, x_position, proteins) %>%
+  distinct()  # Ensure unique positions
+facet_group_positions <- data.frame(filtered_positions)
+facet_group_positions$x_position <- facet_group_positions$x_position + 0.5
+df_long <- df_long %>%
+  dplyr::mutate(
+    plotGroup = case_when(
+      grepl("MPB", Group) ~ "MPB",
+      grepl("CB", Group) ~ "CB",
+      grepl("Platelets", Group) ~ "PLT",
+      TRUE ~ NA_character_  
+    )
+  ) 
+df_day <- df_long %>%
+  dplyr::filter(plotGroup %in% names(src_cols), is.finite(value)) %>%
+  dplyr::mutate(
+    day_num   = as.numeric(stringr::str_extract(Group, stringr::regex("(?<=day)[0-9]+", ignore_case = TRUE))),
+    day       = factor(paste0("Day ", day_num), levels = paste0("Day ", sort(unique(day_num)))),
+    plotGroup = factor(plotGroup, levels = names(src_cols))
+  )
+median_values <- df_day %>%
+  dplyr::group_by(proteins, day, plotGroup) %>%
+  dplyr::summarise(median_value = median(value), .groups = "drop")
+prots <- sort(unique(df_day$proteins))
+fc_plotted <- lit_fc$log2FC[lit_fc$Gene %in% clean_gene(prots)]
+fc_lim     <- if (length(fc_plotted)) ceiling(max(abs(fc_plotted))) else 1
+pretty_limits <- function(r) range(pretty(r, n = 4))
+pretty_breaks <- function(r) pretty(r, n = 4)
+base_theme <- theme_classic(base_size = 7, base_family = font_fam) +
+  theme(
+    axis.text         = element_text(size = 6, colour = "black"),
+    axis.text.x       = element_text(angle = 45, hjust = 1, vjust = 1),
+    axis.title        = element_text(size = 7),
+    axis.line         = element_line(linewidth = 0.25),
+    axis.ticks        = element_line(linewidth = 0.25),
+    axis.ticks.length = unit(0.8, "mm"),
+    plot.title        = element_text(size = 7, face = "bold.italic", hjust = 0.5),
+    legend.position   = "top",
+    legend.text       = element_text(size = 6),
+    legend.key.size   = unit(3, "mm"),
+    plot.margin       = margin(1, 1, 1, 1, "mm")
+  )
+plot_protein_pair <- function(prot, show_y_title = FALSE) {
+  ts <- ggplot(dplyr::filter(df_day, proteins == prot),
+               aes(x = day, y = value, colour = plotGroup)) +
+    geom_point(position = position_jitter(width = 0.08, height = 0, seed = 1),
+               size = 0.9, alpha = 0.75, stroke = 0) +
+    geom_line(data = dplyr::filter(median_values, proteins == prot),
+              aes(y = median_value, group = plotGroup), linewidth = 0.45) +
+    geom_point(data = dplyr::filter(median_values, proteins == prot),
+               aes(y = median_value), size = 1.2) +
+    scale_colour_manual(values = src_cols, name = NULL, drop = FALSE) +
+    scale_y_continuous(name = if (show_y_title) expression(log[2]~"LFQ intensity") else NULL,
+                       limits = pretty_limits, breaks = pretty_breaks,
+                       expand = expansion(mult = 0)) +
+    scale_x_discrete(name = NULL, expand = expansion(add = 0.4)) +
+    labs(title = prot) +
+    base_theme
+  fc_d <- tibble::tibble(study = factor(c("Thom", "Stokhuizen"), levels = c("Thom", "Stokhuizen"))) %>%
+    dplyr::left_join(dplyr::filter(lit_fc, Gene == clean_gene(prot)), by = "study") %>%
+    dplyr::mutate(dir = dplyr::case_when(log2FC > 0 ~ "Up", log2FC < 0 ~ "Down", TRUE ~ NA_character_))
+  fc <- ggplot(fc_d, aes(x = study, y = log2FC)) +
+    geom_hline(yintercept = 0, linewidth = 0.25, colour = "grey50") +
+    geom_segment(aes(xend = study, y = 0, yend = log2FC),
+                 linewidth = 0.4, colour = "grey60", na.rm = TRUE) +
+    geom_point(aes(fill = dir), shape = 21, size = 1.8, stroke = 0.2, colour = "black",
+               na.rm = TRUE, show.legend = FALSE) +
+    geom_text(data = dplyr::filter(fc_d, is.na(log2FC)), aes(y = 0, label = "n.d."),
+              size = 5 / ggplot2::.pt, colour = "grey50", vjust = -0.6) +
+    scale_fill_manual(values = c(Up = "purple", Down = "darkorange"), na.value = "grey80") +
+    scale_y_continuous(name = if (show_y_title) expression(log[2]~"FC (adult/CB)") else NULL,
+                       limits = c(-fc_lim, fc_lim), breaks = scales::breaks_pretty(n = 3),
+                       position = "right", oob = scales::squish) +
+    scale_x_discrete(name = NULL) +
+    labs(title = " ") +
+    base_theme +
+    theme(panel.background = element_rect(fill = "grey97", colour = NA))
+
+  ts + fc + patchwork::plot_layout(widths = c(3, 1))
+}
+pairs <- lapply(seq_along(prots), function(i)
+  plot_protein_pair(prots[i], show_y_title = (i - 1) %% n_col == 0))
+gplotaki_lit <- patchwork::wrap_plots(pairs, ncol = n_col) +
+  patchwork::plot_layout(guides = "collect") &
+  theme(legend.position = "top")
+gplotaki_lit
+# Export
+n_rows     <- ceiling(length(prots) / n_col)
+fig_width  <- 183
+fig_height <- min(170, 15 + 40 * n_rows)
+ggsave("MK_protein_dynamics_with_literature.pdf", gplotaki_lit,
+       width = fig_width, height = fig_height, units = "mm", device = cairo_pdf)
 
 
 
